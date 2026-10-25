@@ -1,0 +1,214 @@
+# =============================================================================
+# docker-compose.infra.yml
+#
+# Purpose: Starts ONLY the backing infrastructure for local development.
+#          PostgreSQL, Redis, Traefik, Prometheus, and Grafana run here.
+#          Application services (api, worker, dashboard) are started separately
+#          via `npm run dev:*` so you get hot-reloading TypeScript in your shell.
+#
+# Usage:
+#   docker compose -f docker-compose.infra.yml up -d
+#   docker compose -f docker-compose.infra.yml down
+#   docker compose -f docker-compose.infra.yml down -v   # destroys all local data
+#
+# Design decision: Infrastructure-only Compose keeps the inner dev loop fast.
+# Running `npm run dev:api` directly (not inside Docker) means TypeScript errors
+# are instantly visible in the terminal with no container rebuild required.
+# =============================================================================
+
+name: shipyard-infra
+
+networks:
+  # Platform-internal network. PostgreSQL, Redis, API, and Worker communicate here.
+  # Application containers must NOT be attached to this network — they only
+  # join shipyard-apps. This enforces the secret isolation boundary defined in
+  # docs/DECISIONS.md ADR-003.
+  shipyard-infra:
+    name: shipyard-infra
+    driver: bridge
+
+  # Application runtime network. Traefik and user application containers share
+  # this network. Traefik routes HTTP traffic by inspecting container names on
+  # this network, not by publishing ports to the host.
+  shipyard-apps:
+    name: shipyard-apps
+    driver: bridge
+
+volumes:
+  postgres-data:
+    name: shipyard-postgres-data
+  redis-data:
+    name: shipyard-redis-data
+  traefik-dynamic-config:
+    # Shared between the host (writer: worker) and Traefik (reader).
+    # The worker writes atomic routing config files here; Traefik watches
+    # this directory via its file provider and reloads without restart.
+    name: shipyard-traefik-dynamic
+  prometheus-data:
+    name: shipyard-prometheus-data
+  grafana-data:
+    name: shipyard-grafana-data
+
+services:
+  # ─── PostgreSQL ──────────────────────────────────────────────────────────────
+  # Relational store: Users, Projects, Deployments, LogLines, EnvVars.
+  # We use a named volume so data persists across `docker compose down` restarts.
+  postgres:
+    image: postgres:16-alpine
+    container_name: shipyard-postgres
+    restart: unless-stopped
+    networks:
+      - shipyard-infra
+    ports:
+      # Expose to localhost only so Prisma migrations can be run from the host.
+      # In production this port is NOT exposed to the internet — only the API
+      # and Worker containers on shipyard-infra can reach it.
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-shipyard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-shipyard}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready confirms the server is accepting connections for our database.
+      # Used by: `make wait-infra`, and dependent services using `depends_on`.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-shipyard} -d ${POSTGRES_DB:-shipyard}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ─── Redis ───────────────────────────────────────────────────────────────────
+  # Two roles:
+  #   1. BullMQ backing store — persistent queues, job locks, retry counters.
+  #   2. Pub/Sub broker — worker publishes log chunks; API fans them out to SSE clients.
+  # We use `appendonly yes` so jobs survive a Redis restart.
+  redis:
+    image: redis:7-alpine
+    container_name: shipyard-redis
+    restart: unless-stopped
+    networks:
+      - shipyard-infra
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: redis-server --appendonly yes --loglevel warning
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ─── Traefik ─────────────────────────────────────────────────────────────────
+  # Reverse proxy and edge router. Handles all external HTTP traffic and routes
+  # requests to the correct application container by inspecting routing rules
+  # in dynamic configuration files (NOT Docker labels — see ADR-004).
+  #
+  # Ports:
+  #   80  → web entrypoint (HTTP traffic from outside)
+  #   8080 → Traefik dashboard/API (localhost only, never exposed publicly)
+  traefik:
+    image: traefik:v3.0
+    container_name: shipyard-traefik
+    restart: unless-stopped
+    networks:
+      - shipyard-infra   # for Prometheus scraping and management access
+      - shipyard-apps    # for routing to application containers
+    ports:
+      - "80:80"
+      - "127.0.0.1:8080:8080"   # Dashboard & API — local only
+    command:
+      # --- Logging ---
+      - "--log.level=INFO"
+      - "--accesslog=true"
+
+      # --- API & Dashboard (local-only, never expose in production) ---
+      - "--api.dashboard=true"
+      - "--api.insecure=true"   # Safe because 8080 is bound to 127.0.0.1 only
+      - "--ping=true"           # Enable the /ping healthcheck endpoint
+
+      # --- Entrypoints ---
+      # 'web' is the main HTTP entrypoint for user traffic on port 80
+      - "--entrypoints.web.address=:80"
+
+      # --- Providers ---
+      # File provider: watches /etc/traefik/dynamic/ for .json config files.
+      # The worker writes these files atomically (tmp → rename) to switch routing.
+      # See docs/DECISIONS.md ADR-004 for why we use file provider over Docker labels.
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"   # inotify-based hot reload, no restart required
+
+      # --- Metrics ---
+      # Prometheus scrapes Traefik at /metrics on port 8080
+      - "--metrics.prometheus=true"
+      - "--metrics.prometheus.addEntryPointsLabels=true"
+      - "--metrics.prometheus.addServicesLabels=true"
+    volumes:
+      # Named volume shared with worker. Worker writes; Traefik reads.
+      - traefik-dynamic-config:/etc/traefik/dynamic
+    healthcheck:
+      # Traefik exposes /ping on the API/dashboard endpoint when healthy
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ─── Prometheus ──────────────────────────────────────────────────────────────
+  # Scrapes metrics from: Traefik, API (/metrics), and Worker (/metrics).
+  # Retention default is 15 days.
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: shipyard-prometheus
+    restart: unless-stopped
+    networks:
+      - shipyard-infra
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ─── Grafana ─────────────────────────────────────────────────────────────────
+  # Visualization dashboard backed by Prometheus.
+  # Default credentials: admin / admin (change on first login).
+  # Provisioned with a datasource and pre-built dashboard via mounted config.
+  grafana:
+    image: grafana/grafana-oss:11.0.0
+    container_name: shipyard-grafana
+    restart: unless-stopped
+    networks:
+      - shipyard-infra
+    ports:
+      - "127.0.0.1:3100:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Auto-provision datasources and dashboards from mounted config
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

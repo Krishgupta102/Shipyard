@@ -1,0 +1,155 @@
+// =============================================================================
+// Shipyard Prisma Schema
+//
+// Defines the core relational data model for Shipyard.
+// All design decisions (specifically state separation and crash recovery)
+// are detailed in docs/DECISIONS.md ADR-002, ADR-004, and ADR-005.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Enums ─────────────────────────────────────────────────────────────────────
+
+enum DeploymentStatus {
+  QUEUED
+  BUILDING
+  DEPLOYING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+enum Slot {
+  BLUE
+  GREEN
+}
+
+enum DeploymentTrigger {
+  MANUAL
+  GITHUB_WEBHOOK
+  ROLLBACK
+}
+
+enum LogStream {
+  STDOUT
+  STDERR
+  SYSTEM
+}
+
+// ── Models ────────────────────────────────────────────────────────────────────
+
+model User {
+  id             String    @id @default(cuid())
+  githubId       String    @unique
+  githubUsername String
+  avatarUrl      String?
+  email          String?
+  projects       Project[]
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@map("users")
+}
+
+model Project {
+  id                 String          @id @default(cuid())
+  name               String
+  slug               String          @unique
+  repoUrl            String
+  defaultBranch      String          @default("main")
+  buildCommand       String?
+  runCommand         String?
+  port               Int             @default(3000)
+  healthCheckPath    String          @default("/health")
+
+  userId             String
+  user               User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // ── Blue-Green Routing State (ADR-002) ──────────────────────────────────
+  // activeDeploymentId is the mutable pointer to whichever deployment is
+  // currently serving live traffic via Traefik.
+  // It is ONLY updated AFTER health checks pass and Traefik verification succeeds.
+  activeDeploymentId String?
+  activeDeployment   Deployment?     @relation("ActiveDeployment", fields: [activeDeploymentId], references: [id], onDelete: SetNull)
+  activeSlot         Slot?
+
+  deployments        Deployment[]    @relation("ProjectDeployments")
+  envVars            ProjectEnvVar[]
+
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  @@index([userId])
+  @@map("projects")
+}
+
+model Deployment {
+  id                       String            @id @default(cuid())
+  projectId                String
+  project                  Project           @relation("ProjectDeployments", fields: [projectId], references: [id], onDelete: Cascade)
+
+  // ── Lifecycle Status (ADR-002) ──────────────────────────────────────────
+  // status is the immutable lifecycle record of this single execution attempt.
+  // Transitions: QUEUED -> BUILDING -> DEPLOYING -> SUCCESS | FAILED | CANCELLED
+  // Once terminal, this status NEVER changes, even if superseded or rolled back.
+  status                   DeploymentStatus  @default(QUEUED)
+  trigger                  DeploymentTrigger @default(MANUAL)
+  targetSlot               Slot
+  commitSha                String
+  commitMessage            String?
+  gitRef                   String            @default("refs/heads/main")
+  imageTag                 String?
+  rollbackFromDeploymentId String?
+
+  startedAt                DateTime?
+  finishedAt               DateTime?
+  failureReason            String?
+
+  logLines                 LogLine[]
+  activeForProjects        Project[]         @relation("ActiveDeployment")
+
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([status])
+  @@map("deployments")
+}
+
+model ProjectEnvVar {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  key       String
+  value     String
+  isSecret  Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, key])
+  @@index([projectId])
+  @@map("project_env_vars")
+}
+
+model LogLine {
+  id           String     @id @default(cuid())
+  deploymentId String
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  stream       LogStream  @default(STDOUT)
+  message      String     @db.Text
+  timestamp    DateTime   @default(now())
+
+  @@index([deploymentId, timestamp(sort: Asc)])
+  @@map("log_lines")
+}

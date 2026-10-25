@@ -1,0 +1,39 @@
+# =============================================================================
+# Prometheus Configuration — Shipyard
+# =============================================================================
+# Prometheus scrapes these targets on the shipyard-infra Docker network.
+# When running locally, service hostnames resolve via Docker's embedded DNS.
+# In production (single EC2 host), localhost or internal IPs are used.
+# =============================================================================
+
+global:
+  scrape_interval: 15s       # How often to scrape each target
+  evaluation_interval: 15s   # How often to evaluate alerting rules
+
+scrape_configs:
+  # ── Prometheus self-monitoring ──────────────────────────────────────────────
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ── Traefik metrics ─────────────────────────────────────────────────────────
+  # Traefik exposes Prometheus metrics on port 8080 at /metrics.
+  # We get: request counts, latencies, entrypoint traffic, backend health.
+  - job_name: "traefik"
+    static_configs:
+      - targets: ["shipyard-traefik:8080"]
+
+  # ── Shipyard API metrics ─────────────────────────────────────────────────────
+  # The API exposes prom-client metrics at GET /metrics.
+  # We get: HTTP request durations, deployment queue depth, webhook counts.
+  # (Populated when api service is running — Phase 2+)
+  - job_name: "shipyard-api"
+    static_configs:
+      - targets: ["host.docker.internal:3001"]
+
+  # ── Shipyard Worker metrics ──────────────────────────────────────────────────
+  # The worker exposes build duration, success/failure counts at GET /metrics.
+  # (Populated when worker service is running — Phase 3+)
+  - job_name: "shipyard-worker"
+    static_configs:
+      - targets: ["host.docker.internal:3002"]

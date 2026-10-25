@@ -1,0 +1,26 @@
+{
+  "name": "shipyard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A self-hosted mini deployment platform — portfolio project covering full-stack, cloud, and DevOps engineering.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev:api": "npm run dev --workspace=apps/api",
+    "dev:worker": "npm run dev --workspace=apps/worker",
+    "dev:dashboard": "npm run dev --workspace=apps/dashboard"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}
