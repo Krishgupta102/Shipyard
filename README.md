@@ -21,7 +21,9 @@
 8. [Blue-Green Deployment & Traefik Routing](#blue-green-deployment--traefik-routing)
 9. [Design Decisions and Trade-offs](#design-decisions-and-trade-offs)
 10. [Implementation Phases](#implementation-phases)
-11. [Known Limitations](#known-limitations)
+11. [AWS Cloud Infrastructure (Phase 7 — Terraform)](#aws-cloud-infrastructure-phase-7--terraform)
+12. [Production Docker Images (Phase 8A)](#production-docker-images-phase-8a)
+13. [Known Limitations](#known-limitations)
 
 ---
 
@@ -347,6 +349,7 @@ See [`docs/DECISIONS.md`](./docs/DECISIONS.md) for complete Architecture Decisio
 | **Phase 5** | ✅ Complete | SSE log streaming, Next.js dashboard |
 | **Phase 6** | ✅ Complete | Prometheus instrumentation, Grafana dashboards |
 | **Phase 7** | ✅ Complete | Terraform IaC for AWS (EC2, VPC, IAM/SSM, ECR, validate/plan verified) |
+| **Phase 8A** | ✅ Complete | Production multi-stage Dockerfiles for API, Worker, and Next.js Dashboard |
 
 ---
 
@@ -374,6 +377,55 @@ make tf-plan
 # Format Terraform HCL files
 make tf-fmt
 ```
+
+---
+
+## Production Docker Images (Phase 8A)
+
+Shipyard provides production-grade multi-stage Dockerfiles for all three monorepo services:
+- **API (`apps/api/Dockerfile`)**: Control plane HTTP REST and Server-Sent Events service.
+- **Worker (`apps/worker/Dockerfile`)**: Background BullMQ worker, Docker build/deploy engine, and metrics server.
+- **Dashboard (`apps/dashboard/Dockerfile`)**: Next.js App Router UI in optimized `standalone` output mode.
+
+All Docker builds must be invoked from the monorepo root to preserve npm workspace resolution (`@shipyard/shared` and shared dependencies).
+
+### Build Commands
+
+```bash
+# Build Control Plane API (runs as non-root nodejs:1001)
+docker build -f apps/api/Dockerfile -t shipyard-api:latest .
+
+# Build Deploy Worker (runs as non-root nodejs:1001 with tini PID 1)
+docker build -f apps/worker/Dockerfile -t shipyard-worker:latest .
+
+# Build Next.js Dashboard (standalone mode, runs as non-root nextjs:1001)
+# Optional: pass NEXT_PUBLIC_API_URL build argument if API URL differs from default
+docker build -f apps/dashboard/Dockerfile -t shipyard-dashboard:latest .
+```
+
+### Key Architectural Assumptions & Runtime Requirements
+
+1. **Monorepo Build Context:**
+   - All builds require the root repository context (`.`) so that npm workspaces (`packages/shared`, `apps/api`, etc.) and the root `package-lock.json` are accessible during dependency installation and TypeScript compilation.
+   - The root `.dockerignore` excludes `.git`, local `.env` files, build caches (`.next`, `dist`), Terraform state files, and host logs from entering image layers.
+
+2. **Least-Privilege Non-Root Execution:**
+   - **API & Worker:** Run as `nodejs:nodejs` (UID 1001, GID 1001).
+   - **Dashboard:** Runs as `nextjs:nodejs` (UID 1001, GID 1001).
+   - Containers run with standard unprivileged execution and do not require `--privileged` mode.
+
+3. **Worker Host Docker Socket Bind-Mount:**
+   - The worker service requires access to the host Docker daemon API (ADR-003) to build user images and manage application containers.
+   - At runtime, bind-mount `/var/run/docker.sock:/var/run/docker.sock`.
+   - The host Docker socket permissions must allow read/write access by UID 1001 (on the EC2 host, the `shipyard` system user is added to the `docker` group by `user_data.sh`).
+
+4. **Next.js Standalone Build & `NEXT_PUBLIC_API_URL`:**
+   - `apps/dashboard/next.config.js` enables `output: 'standalone'`, bundling only referenced node_modules into `.next/standalone` (~226 MB image size).
+   - `NEXT_PUBLIC_API_URL` is statically inlined into browser JavaScript bundles at build time. For production deployments with a known domain or path, supply `--build-arg NEXT_PUBLIC_API_URL=https://api.yourdomain.com`. If omitted, client-side fetches default to `http://localhost:3001`.
+
+5. **Built-in Reliable Health Checks:**
+   - Containers do not require or bundle `curl`.
+   - Health checks use native Node.js HTTP requests (`node -e "const http = require('http'); ..."`) querying `/health` (API on port 3001, Worker metrics server on port 3002) and root path `/` on the Dashboard (port 3000).
 
 ---
 

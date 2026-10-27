@@ -77,8 +77,9 @@ variable "root_volume_type" {
 
 variable "allowed_ssh_cidr" {
   type        = string
-  description = "IPv4 CIDR block allowed to connect via SSH (port 22). Best practice is your specific admin IP /32."
-  default     = "0.0.0.0/0"
+  nullable    = true
+  description = "IPv4 CIDR block allowed to connect via SSH (port 22). Set to your admin IP /32 (e.g. \"203.0.113.4/32\"). Leave null (default) to omit the SSH rule entirely and use AWS SSM Session Manager for keyless shell access."
+  default     = null
 }
 
 variable "ssh_public_key" {

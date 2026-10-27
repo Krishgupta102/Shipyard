@@ -21,8 +21,10 @@ root_volume_size_gb = 50
 root_volume_type    = "gp3"
 
 # Access & Security
-# Best practice: restrict SSH access to your current IP address (e.g., "203.0.113.4/32")
-allowed_ssh_cidr = "0.0.0.0/0"
+# SSH is disabled by default (recommended). Port 22 is not opened in the security group
+# unless allowed_ssh_cidr is explicitly set. Prefer AWS SSM Session Manager for shell access.
+# To enable SSH, uncomment and set to your specific admin IP (never 0.0.0.0/0):
+# allowed_ssh_cidr = "203.0.113.4/32"
 # ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... admin@laptop"
 
 # Domain & TLS Configuration

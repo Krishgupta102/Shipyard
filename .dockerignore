@@ -1,0 +1,67 @@
+# =============================================================================
+# .dockerignore — root-level build context exclusions
+#
+# Applies to all three Dockerfiles (API, Worker, Dashboard) because all build
+# contexts are rooted here to preserve npm workspace resolution.
+# =============================================================================
+
+# ── Git history ──────────────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+
+# ── Node dependencies (installed fresh inside the image) ─────────────────────
+node_modules
+
+# ── TypeScript build outputs (rebuilt inside the image) ──────────────────────
+apps/api/dist
+apps/worker/dist
+packages/shared/dist
+apps/dashboard/.next
+apps/dashboard/out
+
+# ── Environment files — NEVER bake secrets into image layers ─────────────────
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+
+# ── Terraform — state files contain sensitive data ───────────────────────────
+terraform/.terraform
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
+
+# ── Local dev data ────────────────────────────────────────────────────────────
+.docker-volumes
+monitoring
+
+# ── Test artefacts ────────────────────────────────────────────────────────────
+coverage
+.nyc_output
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs
+*.log
+npm-debug.log*
+
+# ── OS / Editor artefacts ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+*.swp
+*.swo
+
+# ── Docs (not needed at runtime) ─────────────────────────────────────────────
+docs
+README.md
+CHANGELOG.md
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+*.tgz
+.turbo
+tsconfig.tsbuildinfo
+apps/dashboard/tsconfig.tsbuildinfo

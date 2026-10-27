@@ -1,0 +1,155 @@
+# =============================================================================
+# docker-compose.prod.yml
+#
+# Production-oriented Docker Compose configuration for Shipyard (Phase 8B).
+#
+# Composes with `docker-compose.infra.yml` to provide the complete production stack:
+#   - Infrastructure: PostgreSQL, Redis, Traefik, Prometheus, Grafana
+#   - Database Migrations: One-off init container executing Prisma schema migrations
+#   - Control Plane API: Express REST / SSE service (private internal network)
+#   - Build & Deploy Worker: BullMQ worker and Docker pipeline (private internal network)
+#   - Dashboard: Next.js standalone App Router UI (private internal network)
+#
+# Usage:
+#   docker compose -f docker-compose.infra.yml -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.infra.yml -f docker-compose.prod.yml ps
+#   docker compose -f docker-compose.infra.yml -f docker-compose.prod.yml down
+# =============================================================================
+
+services:
+  # ─── Database Migrations (One-off Init Container) ──────────────────────────
+  # Runs Prisma schema migrations safely before the API or Worker start.
+  # Guarantees single-runner execution to prevent race conditions during schema updates.
+  db-migrate:
+    image: shipyard-api:latest
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: shipyard-db-migrate
+    restart: "no"
+    networks:
+      - shipyard-infra
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["./node_modules/.bin/prisma", "migrate", "deploy", "--schema=apps/api/prisma/schema.prisma"]
+    environment:
+      DATABASE_URL: ${PROD_DATABASE_URL:-postgresql://${POSTGRES_USER:-shipyard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shipyard}}
+
+  # ─── Control Plane API ──────────────────────────────────────────────────────
+  # Express REST API, BullMQ producer, SSE log streaming.
+  # Private internal service: no host port bindings. Routed exclusively via Traefik.
+  api:
+    image: shipyard-api:latest
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: shipyard-api
+    restart: unless-stopped
+    networks:
+      - shipyard-infra
+      - shipyard-apps
+    expose:
+      - "3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      API_PORT: 3001
+      DATABASE_URL: ${PROD_DATABASE_URL:-postgresql://${POSTGRES_USER:-shipyard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shipyard}}
+      REDIS_URL: ${PROD_REDIS_URL:-redis://redis:6379}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET must be set in .env}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    healthcheck:
+      test: ["CMD", "node", "-e", "const http = require('http'); const req = http.get('http://localhost:3001/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)); req.on('error', () => process.exit(1)); req.setTimeout(5000, () => { req.destroy(); process.exit(1); });"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ─── Build & Deploy Worker ──────────────────────────────────────────────────
+  # BullMQ consumer, Docker Engine build/deploy pipeline, metrics server.
+  # Requires host Docker socket bind-mount to build images and manage containers (ADR-003).
+  # Runs as non-root user (nodejs:1001) under tini (PID 1).
+  worker:
+    image: shipyard-worker:latest
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    container_name: shipyard-worker
+    restart: unless-stopped
+    networks:
+      - shipyard-infra
+      - shipyard-apps
+    expose:
+      - "3002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+      traefik:
+        condition: service_healthy
+    volumes:
+      # Host Docker socket: required by dockerode for image building and container management.
+      # Security boundary (ADR-003): Worker does NOT have --privileged or --cap-add.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared dynamic configuration volume for Traefik routing
+      - traefik-dynamic-config:/etc/shipyard/traefik/dynamic
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${PROD_DATABASE_URL:-postgresql://${POSTGRES_USER:-shipyard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shipyard}}
+      REDIS_URL: ${PROD_REDIS_URL:-redis://redis:6379}
+      DOCKER_SOCKET_PATH: /var/run/docker.sock
+      BUILDS_DIR: /tmp/shipyard/builds
+      TRAEFIK_DYNAMIC_CONFIG_DIR: /etc/shipyard/traefik/dynamic
+      TRAEFIK_API_URL: http://traefik:8080
+      TRAEFIK_INGRESS_URL: http://traefik
+      SHIPYARD_DOMAIN: ${SHIPYARD_DOMAIN:-shipyard.local}
+      APPS_NETWORK: shipyard-apps
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      WORKER_METRICS_PORT: 3002
+      BUILD_TIMEOUT_SECONDS: ${BUILD_TIMEOUT_SECONDS:-300}
+      BUILD_MEMORY_LIMIT_MB: ${BUILD_MEMORY_LIMIT_MB:-1024}
+    healthcheck:
+      test: ["CMD", "node", "-e", "const http = require('http'); const req = http.get('http://localhost:3002/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)); req.on('error', () => process.exit(1)); req.setTimeout(5000, () => { req.destroy(); process.exit(1); });"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ─── Dashboard UI ────────────────────────────────────────────────────────────
+  # Next.js App Router standalone production server.
+  # Private internal service: no host port bindings. Routed exclusively via Traefik.
+  dashboard:
+    image: shipyard-dashboard:latest
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    container_name: shipyard-dashboard
+    restart: unless-stopped
+    networks:
+      - shipyard-infra
+      - shipyard-apps
+    expose:
+      - "3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    healthcheck:
+      test: ["CMD", "node", "-e", "const http = require('http'); const req = http.get('http://localhost:3000/', (res) => process.exit(res.statusCode < 500 ? 0 : 1)); req.on('error', () => process.exit(1)); req.setTimeout(5000, () => { req.destroy(); process.exit(1); });"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s

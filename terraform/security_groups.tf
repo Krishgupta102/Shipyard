@@ -39,13 +39,18 @@ resource "aws_security_group" "shipyard_ec2" {
     ipv6_cidr_blocks = ["::/0"]
   }
 
-  # ── Ingress: SSH (Port 22) ─────────────────────────────────────────────────
-  ingress {
-    description = "SSH administrative access (prefer AWS SSM Session Manager where possible)"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
+  # ── Ingress: SSH (Port 22) — optional, disabled by default ─────────────────
+  # SSH is omitted when allowed_ssh_cidr is null (the default). Set allowed_ssh_cidr
+  # to your admin IP /32 in terraform.tfvars to enable it. Prefer SSM Session Manager.
+  dynamic "ingress" {
+    for_each = var.allowed_ssh_cidr != null ? [var.allowed_ssh_cidr] : []
+    content {
+      description = "SSH administrative access (prefer AWS SSM Session Manager where possible)"
+      from_port   = 22
+      to_port     = 22
+      protocol    = "tcp"
+      cidr_blocks = [ingress.value]
+    }
   }
 
   # ── Egress: All outbound traffic ───────────────────────────────────────────

@@ -1,0 +1,48 @@
+# =============================================================================
+# Traefik Dynamic Configuration — Shipyard Platform Routes (Phase 8B)
+#
+# Configures routing for the Shipyard Control Plane (Dashboard and API)
+# through the Traefik reverse proxy.
+#
+# Routing architecture:
+#   1. API routes (higher specificity):
+#      - Subdomain: api.shipyard.local (or api.<domain>)
+#      - PathPrefixes: /api, /health, /webhooks
+#      Forwarded to: http://api:3001
+#
+#   2. Dashboard routes (fallback / lower priority):
+#      - Domain: shipyard.local (or <domain>), localhost
+#      - PathPrefix: / (priority: 1)
+#      Forwarded to: http://dashboard:3000
+#
+# Deployed user applications use dynamic files written by the worker
+# (${projectId}.yml) with rule Host(`${projectSlug}.${shipyardDomain}`).
+# =============================================================================
+
+http:
+  routers:
+    # Shipyard Control Plane API
+    router-api:
+      rule: "HostRegexp(`^api\\..+`) || PathPrefix(`/api`) || PathPrefix(`/health`) || PathPrefix(`/webhooks`)"
+      service: srv-api
+      entryPoints:
+        - web
+
+    # Shipyard Next.js Dashboard
+    router-dashboard:
+      rule: "PathPrefix(`/`)"
+      priority: 1
+      service: srv-dashboard
+      entryPoints:
+        - web
+
+  services:
+    srv-api:
+      loadBalancer:
+        servers:
+          - url: "http://api:3001"
+
+    srv-dashboard:
+      loadBalancer:
+        servers:
+          - url: "http://dashboard:3000"

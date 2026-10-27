@@ -1,0 +1,32 @@
+# =============================================================================
+# Prometheus Configuration — Shipyard Production Compose (Phase 8B)
+# =============================================================================
+# Scrapes metrics via internal container DNS on the shipyard-infra network.
+# =============================================================================
+
+global:
+  scrape_interval: 15s       # How often to scrape each target
+  evaluation_interval: 15s   # How often to evaluate alerting rules
+
+scrape_configs:
+  # ── Prometheus self-monitoring ──────────────────────────────────────────────
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ── Traefik metrics ─────────────────────────────────────────────────────────
+  - job_name: "traefik"
+    static_configs:
+      - targets: ["traefik:8080"]
+
+  # ── Shipyard API metrics ─────────────────────────────────────────────────────
+  # Internal container DNS on shipyard-infra network
+  - job_name: "shipyard-api"
+    static_configs:
+      - targets: ["api:3001"]
+
+  # ── Shipyard Worker metrics ──────────────────────────────────────────────────
+  # Internal container DNS on shipyard-infra network
+  - job_name: "shipyard-worker"
+    static_configs:
+      - targets: ["worker:3002"]
