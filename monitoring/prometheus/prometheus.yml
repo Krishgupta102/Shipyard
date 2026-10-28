@@ -29,11 +29,11 @@ scrape_configs:
   # (Populated when api service is running — Phase 2+)
   - job_name: "shipyard-api"
     static_configs:
-      - targets: ["host.docker.internal:3001"]
+      - targets: ["shipyard-api:3001"]
 
   # ── Shipyard Worker metrics ──────────────────────────────────────────────────
   # The worker exposes build duration, success/failure counts at GET /metrics.
   # (Populated when worker service is running — Phase 3+)
   - job_name: "shipyard-worker"
     static_configs:
-      - targets: ["host.docker.internal:3002"]
+      - targets: ["shipyard-worker:3002"]
